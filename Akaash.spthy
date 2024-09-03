@@ -1,0 +1,154 @@
+theory AKAASH_protocol
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption, hashing, signing
+
+/* Defining functions */
+functions: eckeygen/1, ecqv_cert/4, ecqv_pub/3, schnorr_sign/4,schnor_sign/3, schnorr_verify/5, nonce/0, session_key/2, encrypt/2, decrypt/2,Condition_case/1
+
+/* Registration Phase */
+rule ATSU_registration:
+  let
+    sk_atsu = nonce() // Random Public Qcai
+    cert_atsu = ecqv_cert('ID_atsu', 'LT_atsu', 'IDca', sk_atsu)
+    pk_atsu = ecqv_pub('ID_atsu', 'LT_atsu', cert_atsu) // Q is calculated
+  in
+    [Fr(~sk_atsu)]
+    --[Register_ATSU('ID_atsu', cert_atsu)]->
+    [!ATSU_sk('ID_atsu', sk_atsu), !ATSU_cert('ID_atsu', cert_atsu), !ATSU_pk('ID_atsu', pk_atsu)]
+
+rule Aircraft_registration:
+  let
+    sk_ac = nonce()
+    cert_ac = ecqv_cert('ID_ac', 'LT_ac', 'IDca', sk_ac)
+    pk_ac = ecqv_pub('ID_ac', 'LT_ac', cert_ac)
+  in
+    [Fr(~sk_ac)]
+    --[Register_AC('ID_ac', cert_ac)]->
+    [!AC_sk('ID_ac', sk_ac), !AC_cert('ID_ac', cert_ac), !AC_pk('ID_ac', pk_ac)]
+
+/* Initialization Phase */
+rule Initialization:
+  let
+    r_atsu = nonce()
+    r_ac = nonce()
+  in
+    [!ATSU_pk('ID_atsu', pk_atsu), !AC_sk('ID_ac', sk_ac)]
+    --[Init('ID_atsu', 'ID_ac')]->
+    [!Nonce_atsu(r_atsu), !Nonce_ac(r_ac)]
+
+/* Mutual Authentication and Key Exchange Phase */
+rule Mutual_Authentication_Key_Exchange:
+  let
+    r_atsu = nonce()
+    r_ac = nonce()
+    sk_atsu = nonce()
+    s = schnor_sign(<'ID_atsu', 'Cert_atsu', 'LT_atsu'>, r_atsu, sk_atsu)
+    k = session_key(r_atsu, r_ac)
+  in
+    [Fr(~r_atsu), Fr(~r_ac), !Nonce_atsu(r_atsu)]
+    --[Send_M1('ID_atsu', 'Cert_atsu', 'LT_atsu', s), Knows('ID_atsu', k, 'ID_ac')]->
+  [!Session_key_atsu('ID_atsu', 'ID_ac', k), Receive_M2('ID_ac', k, s)]
+
+
+
+/* Key Exchange Validation by Aircraft */
+rule Key_Exchange_Validation:
+  let
+    s_ac = schnor_sign(<'ID_ac', 'Cert_ac', 'LT_ac'>, r_ac, sk_ac)
+    Equality_Check_Result = 'Outcomeofconditioncheck'
+  in
+    [!Session_key_atsu('ID_atsu', 'ID_ac', k), !Nonce_ac(r_ac), !Nonce_ac(r_atsu), !AC_sk('ID_ac', sk_ac)]
+    --[Send_M2('ID_ac', k, s_ac,r_ac,Equality_Check_Result), Verify_M2(s_ac),  Receive_M1('ID_atsu', 'Cert_atsu', 'LT_atsu'), Knows('ID_ac', k, 'ID_atsu'),  Commit('ID_ac', 'ID_atsu', k)]->
+    [!Session_key_ac('ID_ac', 'ID_atsu', k)]
+
+
+    /* Handover Phase */
+    rule Handover:
+      let
+        new_sk = nonce()  /* Generate a new session key for the handover */
+        h_k_star = h('K_star') /* Hash of the old session key */
+      in
+
+        [!Session_key_ac('ID_ac', 'ID_atsu', 'K'),!AC_pk('ID_ac', pk_ac)]
+        --[Handover_Request(new_sk, h_k_star), Handover_Acknowledge(new_sk, h_k_star),Secret(new_sk), Secret(h_k_star), Honest('ID_atsu'), Honest('ID_ac'), Knows('ID_atsu',new_sk,'ID_ac')]->
+        [!Session_key_ac('ID_ac', 'ID_new_atsu', new_sk), !Handover_successful('ID_ac', 'ID_new_atsu', new_sk)]
+
+    /* Attacker Model */
+
+    // Rule for revealing an agent's long-term key
+    rule Reveal_ltk:
+      [ !Ltk($X, ltkX) ] --[ Reveal($X) ]-> [ Out(ltkX), !Ltk($X, ltkX) ]
+
+    // Rule for leaking a session key
+    rule Leak_session_key_ac:
+      [ !Session_key_ac($ID_ac, $ID_atsu, sk) ] --[ LeakedSK_ac(sk) ]-> [ Out(sk) ]
+
+    rule Leak_session_key_atsu:
+      [ !Session_key_atsu($ID_atsu, $ID_ac, sk) ] --[ LeakedSK_atsu(sk) ]-> [ Out(sk) ]
+
+
+        /* Lemmas */
+
+    lemma ATSU_Registration_Executable:
+      exists-trace
+        "Ex ID_atsu Cert_atsu #i.
+           Register_ATSU(ID_atsu, Cert_atsu)@i"
+
+    lemma Aircraft_Registration_Executable:
+      exists-trace
+      "Ex ID_ac Cert_ac #j.
+          Register_AC(ID_ac, Cert_ac)@j"
+
+
+    lemma Initialization_Executable:
+      exists-trace
+      "Ex ID_atsu ID_ac #k.
+          Init(ID_atsu, ID_ac)@k"
+
+    lemma Mutual_Authentication_Key_Exchange_Executable:
+      exists-trace
+      "Ex ID_atsu  Cert_atsu LT_atsu s #l.
+          Send_M1(ID_atsu, Cert_atsu, LT_atsu, s)@l "
+
+
+lemma mutual_authentication_AKAASH:
+     "All ID_atsu Cert_atsu LT_atsu  #i.
+           Receive_M1(ID_atsu, Cert_atsu, LT_atsu)@i ==>
+           (Ex r_atsu s  #j. Send_M1(ID_atsu, Cert_atsu, r_atsu, s)@j &
+           j < i )
+             | (Ex C #r. Reveal(C)@r & Honest(C)@i & #r < #i)"
+
+
+   lemma secrecy:
+    "All x #i.
+        Secret(x)@i ==>
+          not (Ex #j. K(x)@j)
+          | (Ex ID_atsu #r. Reveal(ID_atsu)@r & Honest(ID_atsu)@i & #r<#i)"
+
+
+
+lemma secure_key_establishment:
+    "All A B x #i. Commit(A, B, x)@i ==>
+            ( Ex P  #j #m. Knows(A, P, B)@m & Knows(B, P, A)@j)
+            | (Ex C #r. Reveal(C)@r & Honest(C)@i & #r<#i)"
+
+
+   lemma All_Phases_Executable:
+  exists-trace
+  "Ex ID_atsu Cert_atsu ID_ac Cert_ac k s s_ac r_ac Equ #i #j #k #l #m.
+      Register_ATSU(ID_atsu, Cert_atsu)@i &
+      Register_AC(ID_ac, Cert_ac)@j &
+      Init(ID_atsu, ID_ac)@k &
+      Send_M1('ID_atsu', 'Cert_atsu', 'LT_atsu', s)@l &
+      Send_M2('ID_ac', k, s_ac,r_ac,Equ)@m &
+      Verify_M2(s_ac)@m &
+      Receive_M1('ID_atsu', 'Cert_atsu', 'LT_atsu')@m"
+
+
+
+
+
+
+
+end

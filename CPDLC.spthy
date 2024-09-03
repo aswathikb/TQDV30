@@ -1,0 +1,277 @@
+theory cpdlc_model
+begin
+
+builtins: diffie-hellman, symmetric-encryption, signing, hashing
+
+functions: sdec/2, nonce/0, g/0
+
+/*rule Register_pk:
+  [Fr(~ltkX), Fr(~d), Fr(~Q)]
+  --[OnlyOnceV($X)]->
+  [
+    !Ltk($X, ~ltkX)
+    , !Pk($X, pk(~ltkX))
+    , !SkQpair($X, ~d, ~Q)
+    , Out(pk(~ltkX))
+    , Out(pk(~Q))
+  ]
+  */
+
+rule Register_pk:
+    [ Fr(~ltkX) ]
+    --[ OnlyOnceV($X) ]->
+    [
+      !Ltk($X, ~ltkX)
+      , !Pk($X, pk(~ltkX))
+      , Out(pk(~ltkX))
+    ]
+
+rule CA_init:
+  [ Fr(~ltk) ]
+  --[OnlyOnce() ]->
+  [
+    !LtkCA(~ltk)
+    , !PkCA(pk(~ltk))
+    , Out(pk(~ltk))
+  ]
+
+
+
+  // rules:
+/*
+  rule Registration:
+    let pk1 = pk(~d1)
+      pk2 = pk(~d2)
+      pka = pk(~da)
+    in
+    [
+      Fr(~d1)
+      , Fr(~d2)
+      , Fr(~da)
+      ,!Ltk(ID1, ~d1),
+      !Ltk(ID2, ~d2),
+      !Ltk(IDa, ~da)
+  ]
+    --[CreateG1(ID1, ~d1), CreateG2(ID2, ~d2), CreateA(IDa, ~da) ]->
+  [
+
+     Out(<ID1, pk1, ID2, pk2,IDa, pka>)
+  ]
+*/
+  rule CreateSessionKey_1:
+    let hIDsa = h(~IDsa)
+    Sk1 = h(d1, Qa, ID1, hIDsa)
+    in
+    [
+      In(<ID1, ID2, Qa>)
+      , Fr(~IDsa)
+      , !Ltk(ID1, d1)
+      , !Pk(ID2, Qa)
+    ]
+    --[EstablishSessionKey_1(ID1, Sk1), Honest(ID1)]->
+    [
+    //  !SessionKey(ID1, Sk1),
+      Out(Sk1)
+    ]
+
+  rule ContactRequest:
+    let SignedMos = sign(<ID1, ID2, IDsa, TS1>, ltka1)
+        M1 = (senc{<ID2, TS1, SignedMos>}Sk1)
+    in
+    [
+        In(<ID1, pk(Q1), pk(Q2), ID2, IDa, Sk1>)
+    //  , !Pk(ID1, pk(IDa))
+        , !Ltk(ID1, Q1 )
+        , !Ltk(ID2, Q2)
+        , !Pk(IDa, Qa)
+        , Fr(TS1)
+        , Fr(ltka1)
+        , Fr(IDsa)
+    ]
+    --[CheckG1(ID1, Sk1), Knows(ID1, TS1, ID2)]->
+    [
+    //  S_Contact(ID1,TS1, IDa, Sk1, ltka1, SignedMos),
+       Out(<IDa, M1, TS1, Sk1>)
+    ]
+
+
+    rule ContactResponse:
+    let
+      // Decrypt the message
+      DecryptedM1 = sdec{M1 }Sk1
+      SignatureValid = verify(<ID1, ID2, IDsa, TS1>, SignedMos, Q1)
+      M2 = senc{<Q2, ~TS2>}Sk1
+    in
+    [
+    //  S_Contact(ID1,TS1, IDa, Sk1, ltka1, SignedMos),
+      In(<IDa, M1, Sk1>),
+    //  !SessionKey(ID1, Sk1),
+      !Ltk(ID1, Q1),
+      !Pk(ID2, Q2),
+      Fr(~TS2),
+      Fr(TS1),
+      Fr(IDsa),
+      Fr(SignedMos)
+    ]
+      --[
+      CheckM1(ID1, TS1,SignedMos),
+      CheckSignature(SignatureValid),
+      Knows(ID2, TS1, ID1)]->
+    [
+      // Store TS2 along with other data
+    //  !StoredData(~TS2, TS1, ID2, IDa),
+      // Output the constructed message
+      Out(<ID1, M2>)
+    ]
+
+rule LogonRequest:
+  let
+   y = nonce()
+   Y = g ^ y
+   SK2_star = h(y, Q2, TS2)
+   EA = senc{<ID2, ID1, IDa, TS1, SignedMos>}SK2_star
+   M3 = <ID2, TS2, Y, EA>
+  in
+    [
+    Fr(~y),
+      !Pk(ID2, Q2),
+      !Ltk(ID1, Q1),
+      !Pk(ID2, IDa),
+      Fr(TS2),
+      Fr(TS1),
+      Fr(SignedMos)
+    ]
+    --[SendLogonRequest(ID1, ID2, TS2),  Honest(ID2), Honest(ID1) ]->
+    [
+  Out(<ID1,IDa, M3>),
+  !SessionKey(ID1, SK2_star)  // Store session key for future communications
+]
+
+rule LogonResponse:
+let
+  SK2_star = h(d2, Y, TS2)
+  EA_decrypted = sdec{EA}SK2_star
+  r = nonce()
+  R = g ^ r
+  SK2 = h(r, Qa, d2, Y)
+  M1S = <ID1, ID2, IDa, TS1, TS2>
+  M1Sd2 = sign(M1S, d2)
+  M4 = <IDa, M1Sd2, h(SK2, M1Sd2)>
+in
+[
+  //In(<IDa, M3>),
+  !SessionKey(ID2, SK2_star),
+  !Ltk(ID1, Q1),
+  !Pk(ID2, Q2),
+  !Ltk(ATSU2, d2),
+  !Pk(IDa, Qa),
+  Fr(TS2),
+  Fr(TS1),
+  Fr(Y)
+]
+--[RespondLogonRequest(IDa, ID2 , ID1), Honest(ID2), Honest(IDa)]->
+[
+Out(<M4>)
+]
+
+
+rule ArrivalM4:
+let
+  y = nonce()
+  SK2 = h(da, R2, y, Q2)
+  VerificationHash = h(SK2, M1Sd2)
+in
+[
+  In(<M4, M1Sd2>),
+  !Ltk(IDa, da),
+  !Ltk(ID2, d2),
+  Fr(R2),
+  !Ltk(ID2, d2),
+  !Pk(ID2, Q2),
+  Fr(TS2)
+]
+--[ReceiveM4andVerify(IDa, ID2, VerificationHash),
+  Secret(SK2), Honest(IDa), Honest(ID2)]->
+  [
+    Out(<TS2, M1Sd2>),
+    StopCommunication(IDa) // Stop the communication as ATSU 2 takes over
+  //  !SessionKey(IDa, SK2)
+  ]
+
+
+
+  // Rule for revealing an agent's long-term key
+  rule Reveal_ltk:
+    [ !Ltk($X, ltkX) ] --[ Reveal($X) ]-> [ Out(ltkX) ]
+
+
+
+lemma executable:
+    exists-trace
+    "Ex A1 sk1 TS1 sm sv A2 t2 A3 vhash #l #m #n #o #p #q.
+        EstablishSessionKey_1(A1, sk1)@l
+        & CheckG1(A1, sk1)@m
+        & CheckM1(A1, TS1, sm)@n
+        & CheckSignature(sv)@o
+        & SendLogonRequest(A1, A2, t2)@p
+        & ReceiveM4andVerify(A3, A2, vhash)@q"
+
+
+
+lemma executable_2:
+    exists-trace
+    "Ex A1 sk1  #l .
+       EstablishSessionKey_1(A1, sk1)@l"
+
+lemma executable_3:
+    exists-trace
+    "Ex A1 sk1  #m .
+       CheckG1(A1, sk1)@m"
+
+lemma executable_4:
+  exists-trace
+  "Ex A1 TS1 sm sv #n #o .
+    CheckM1(A1, TS1, sm)@n
+    & CheckSignature(sv)@o"
+
+lemma executable_5:
+    exists-trace
+    "Ex A1 A2 t2 #p .
+       SendLogonRequest(A1, A2, t2)@p"
+/*
+lemma executable_6:
+    exists-trace
+      "Ex A3 A2 A1  #r .
+      RespondLogonRequest(A3, A2, A1)@r"
+*/
+
+lemma executable_6:
+    exists-trace
+      "Ex A3 A2 vhash  #q .
+      ReceiveM4andVerify(A3, A2, vhash)@q"
+
+
+lemma secrecy:
+  "All x #i.
+   Secret(x)@i ==>
+    not (Ex #j. K(x)@j)
+    | (Ex B #r. Reveal(B)@r & Honest(B)@i & #r<#i)"
+
+
+ lemma mutual_authentication:
+   "All A3 A2 A1  #i. RespondLogonRequest(A3, A2, A1)@i ==>
+      ( Ex  t2#j. SendLogonRequest(A1, A2, t2)@j
+      & j<i
+      & not (Ex B3 B2 B1 #i2. RespondLogonRequest(B3, B2, B1)@i2 & not(#i2=#i))
+      )
+      | (Ex C #r. Reveal(C)@r & Honest(C)@i & #r<#i)"
+
+
+lemma secure_key_establishment:
+    "All A3 A2 A1  #i. RespondLogonRequest(A3, A2, A1)@i ==>
+      ( Ex t1 #j #m. Knows(A1, t1, A2)@m & Knows(A2, t1, A1)@j
+      & not (Ex D1 t2 D2 #k. Knows(D1, t2, D2)@k & not(#m=#k) & not(#j=#k))
+      )
+      | (Ex C #r. Reveal(C)@r & Honest(C)@i & #r<#i)"
+
+end
